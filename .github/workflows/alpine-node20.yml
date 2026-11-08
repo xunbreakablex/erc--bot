@@ -1,0 +1,101 @@
+# node:20-alpine üzerinde derleme/yükleme kanıtı (yalnızca test branch'i; pull request'e girmez).
+# Repodaki Dockerfile ile imajı derler, sonra konteyner içinde native modüllerin (özellikle
+# @discordjs/opus 0.10) gerçekten yüklendiğini ve kodlayıcının opusscript'e düşmediğini gösterir.
+name: alpine-node20
+
+on:
+  push:
+    branches: [ci-alpine-node20]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  alpine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker build (repodaki Dockerfile, node:20-alpine)
+        run: |
+          set -o pipefail
+          docker build --progress=plain -t ercu-bot:test . 2>&1 | tee build.log
+          echo "## Docker build: BAŞARILI" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build günlüğünde engine/derleme uyarıları
+        if: always()
+        run: |
+          {
+            echo "### npm ci uyarıları (EBADENGINE vb.)"
+            echo '```'
+            grep -nE "EBADENGINE|npm warn|npm WARN|gyp ERR|gyp info ok|node-pre-gyp (info|WARN|ERR)|Pre-built|prebuilt|prebuild" build.log | head -60 || echo "(eşleşen satır yok)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -nE "EBADENGINE|npm warn|gyp ERR|node-pre-gyp" build.log | head -60 || true
+
+      - name: Ortam (Node sürümü, Alpine, musl)
+        run: |
+          docker run --rm ercu-bot:test sh -c 'echo "node: $(node -v)"; echo "alpine: $(cat /etc/alpine-release)"; (ldd --version 2>&1 || true) | head -1; echo "yt-dlp: $(yt-dlp --version)"'
+
+      - name: "@discordjs/opus yüklendi mi, derlenmiş mi hazır ikili mi?"
+        run: |
+          docker run --rm ercu-bot:test sh -c '
+            set -e
+            echo "paket sürümü: $(node -p "require(\"@discordjs/opus/package.json\").version")"
+            echo "--- .node dosyaları:"
+            find node_modules/@discordjs/opus -name "*.node" -type f
+            echo "--- kodlama/çözme denemesi:"
+            node -e "
+              const { OpusEncoder } = require(\"@discordjs/opus\");
+              const enc = new OpusEncoder(48000, 2);
+              const pcm = Buffer.alloc(960 * 2 * 2);
+              const paket = enc.encode(pcm);
+              const geri = enc.decode(paket);
+              console.log(\"OPUS OK: kodlanan\", paket.length, \"bayt, çözülen\", geri.length, \"bayt\");
+            "
+          '
+
+      - name: "@discordjs/voice hangi kodlayıcıyı görüyor? (opusscript'e düşüyor mu)"
+        run: |
+          docker run --rm ercu-bot:test node -e '
+            const v = require("@discordjs/voice");
+            console.log(v.generateDependencyReport());
+          ' | tee voice-report.txt
+          {
+            echo "### @discordjs/voice bağımlılık raporu (Node 20 / Alpine)"
+            echo '```'
+            cat voice-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Native modüller (better-sqlite3, canvas) yükleniyor mu
+        run: |
+          docker run --rm ercu-bot:test node -e '
+            require("better-sqlite3");
+            const { createCanvas } = require("canvas");
+            const c = createCanvas(10, 10);
+            c.toBuffer((err, buf) => { if (err) throw err; console.log("NATIVE OK: canvas asenkron PNG", buf.length, "bayt"); });
+          '
+
+      - name: Tüm komutlar ve müzik modülleri Node 20'de yükleniyor mu
+        run: |
+          docker run --rm -e DISCORD_TOKEN=test-degil-gercek-degil ercu-bot:test node -e '
+            const { Collection } = require("discord.js");
+            const client = { commands: new Collection() };
+            require("./src/handlers/loadCommands")(client);
+            console.log("yüklenen komut sayısı:", client.commands.size);
+            for (const m of ["./src/music/ytdlp", "./src/music/musicManager", "./src/music/kalite", "./src/utils/pngBuffer", "./src/events/messageCreate", "./src/events/interactionCreate"]) {
+              require(m);
+              console.log("yüklendi:", m);
+            }
+          '
+
+      - name: Tüm .js dosyalarında söz dizimi denetimi
+        run: docker run --rm ercu-bot:test sh -c 'find src -name "*.js" -print0 | xargs -0 -n1 node --check && echo "SÖZ DİZİMİ OK"'
+
+      - name: Özet
+        if: always()
+        run: |
+          echo "İş bitti, durum=${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
