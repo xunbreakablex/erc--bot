@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { getInfo, getPlaylist, kisaHata, MAX_PLAYLIST } = require('../../music/ytdlp');
-const ytSearch = require('yt-search');
+const { ara } = require('../../music/arama');
 const { errorEmbed, successEmbed, infoEmbed } = require('../../utils/embeds');
 const musicManager = require('../../music/musicManager');
 const logger = require('../../utils/logger');
@@ -21,7 +21,8 @@ async function resolveTracks(query) {
   if (isYoutubeUrl(query)) {
     return [await getInfo(query)];
   }
-  const result = await ytSearch(query);
+  // Arama ayrı thread'de (ana thread bloke olmasın), zaman aşımı korumalı.
+  const result = await ara(query);
   const video = result.videos?.[0];
   return video ? [{ url: video.url, title: video.title, duration: video.seconds || null }] : [];
 }
@@ -72,8 +73,10 @@ module.exports = {
     logger.info(`!play — sunucu: ${interaction.guild?.name}, kullanıcı: ${interaction.user.tag}, sorgu: "${query}"`);
 
     let tracks;
+    const cozumlemeBas = Date.now();
     try {
       tracks = await resolveTracks(query);
+      logger.info(`!play çözümleme ${Date.now() - cozumlemeBas} ms (sorgu: "${query}")`);
     } catch (err) {
       // Hata yutulunca "çekemedim" mesajının sebebi loglarda görünmüyordu.
       logger.error(`Şarkı çözümlenemedi (sorgu: "${query}")`, err);

@@ -47,6 +47,8 @@ module.exports = {
     const sunucular = client.guilds.cache.map((g) => `${g.name} (${g.id})`);
     logger.info(`Bulunduğu sunucular (${sunucular.length}): ${sunucular.join(', ') || 'yok'}`);
     client.user.setActivity(`${config.prefix}help`);
+    // Ses takılmalarını görebilmek için ana thread duraksamaları (eşik aşılınca) log'a yazılır.
+    require('../utils/gecikmeIzle').baslat();
     startReminderPolling(client);
     startInflationScheduler();
   },

@@ -1,4 +1,4 @@
-const ytSearch = require('yt-search');
+const { ara } = require('../music/arama');
 const { HARITALAR, TIPLER, KANALLAR, sorgular } = require('../content/cs2Lineups');
 const logger = require('./logger');
 
@@ -41,7 +41,7 @@ async function lineupAra(haritaKey, tipKey, filtre = null) {
 
   for (const sorgu of sorgular(haritaKey, tipKey, filtre)) {
     // Tek bir sorgu patlarsa diğerleri devam etsin.
-    const sonuc = await ytSearch(sorgu).catch((err) => {
+    const sonuc = await ara(sorgu).catch((err) => {
       logger.warn(`CS2 lineup araması başarısız: "${sorgu}" (${err?.message || err})`);
       return { videos: [] };
     });
