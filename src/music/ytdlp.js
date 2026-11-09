@@ -312,6 +312,8 @@ async function dogrudanSeekAkisi(url, saniye, onError) {
   );
 
   const proc = spawn(FFMPEG_PATH, ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Sarma, müzik çalarken yapılıyor: bu süreç çalan sesin (ana thread) işlemcisini çalmasın.
+  oncelikDusur(proc);
 
   let stderr = '';
   proc.stderr.on('data', (chunk) => {
@@ -358,6 +360,10 @@ async function ytdlpSeekAkisi(url, saniye, onError) {
     ['-hide_banner', '-nostats', '-i', 'pipe:0', '-ss', String(Math.max(0, saniye)), '-vn', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
+  // Sarma, müzik çalarken yapılıyor (eski akış yenisi hazır olana kadar çalıyor): iki süreç de düşük öncelikli,
+  // yt-dlp'nin Node alt süreci de bu önceliği devralıyor.
+  oncelikDusur(yt);
+  oncelikDusur(ff);
 
   yt.stdout.pipe(ff.stdin);
   const sessiz = () => {};
