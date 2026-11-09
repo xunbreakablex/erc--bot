@@ -14,6 +14,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const ytdlp = require('./ytdlp');
 const panel = require('./panel');
 const kalite = require('./kalite');
+const paketOnbellegi = require('./paketOnbellegi');
 const logger = require('../utils/logger');
 
 const LOOP_MODLARI = ['kapali', 'sarki', 'kuyruk'];
@@ -95,6 +96,8 @@ function destroyState(guildId) {
     state.seekDurum = null;
   }
   removePanel(state);
+  state.onbellek?.temizle();
+  state.onbellek = null;
   try {
     state.killStream?.();
     state.player.stop(true);
@@ -269,10 +272,35 @@ async function playNext(guildId) {
   calinanlaraEkle(state, next);
   state.killStream?.();
 
+  // Önceki şarkının paket önbelleği: aynı şarkı yeniden çalınıyorsa (tekrar modu) YouTube'a gitmeden oradan çalınır,
+  // değilse bellek bırakılır.
+  let tekrarOnbellek = null;
+  if (state.onbellek) {
+    const onb = state.onbellek;
+    if (onb.url === next.url && onb.tamamlandi && !onb.eksik && !next.failed) {
+      tekrarOnbellek = onb;
+    } else {
+      onb.temizle();
+      state.onbellek = null;
+    }
+  }
+
   // Bağlantı hazır olmadan çalmaya başlarsak ses gitmiyor ve hiçbir hata da çıkmıyor.
   if (!(await baglantiyiBekle(state, guildId))) return;
 
   try {
+    if (tekrarOnbellek) {
+      if (getState(guildId) !== state || state.current !== next || state.skipRequested || tekrarOnbellek.temizlendi) {
+        if (getState(guildId) === state && state.current === next) playNext(guildId);
+        return;
+      }
+      logger.info(`Önbellekten tekrar çalınıyor (YouTube'a gidilmedi) [${next.title}]`);
+      state.player.play(createAudioResource(tekrarOnbellek.okuyucu(0), { inputType: StreamType.Opus }));
+      sendPanel(state);
+      otomatikOnYukle(state);
+      return;
+    }
+
     const { stream, kill } = ytdlp.createStream(next.url, (err) => {
       logger.error('yt-dlp hatası', err);
       // Döngü modunda bozuk şarkı sonsuza kadar yeniden denenmesin.
@@ -295,8 +323,18 @@ async function playNext(guildId) {
     }
 
     // "webm/opus" = dönüştürmesiz doğrudan geçiş; "arbitrary" = ffmpeg ile dönüştürülen yedek yol.
-    logger.info(`Akış türü [${next.title}]: ${type}`);
-    const resource = createAudioResource(kaynak, { inputType: type });
+    let resource;
+    if (type === StreamType.WebmOpus && paketOnbellegi.onbellegeUygunMu(next.duration)) {
+      // Opus paketleri bellekte tutulur (süre sınırın altındaysa): çalma ve sarma bu diziden yapılır, sarma için
+      // YouTube'a yeni istek gerekmez. Uzun içerikler ya da süresi bilinmeyenler aşağıdaki gibi akıştan çalınır.
+      const onb = paketOnbellegi.onbellekKur(next.url, kaynak, kill);
+      state.onbellek = onb;
+      logger.info(`Akış türü [${next.title}]: ${type} (bellek önbelleği açık)`);
+      resource = createAudioResource(onb.okuyucu(0), { inputType: StreamType.Opus });
+    } else {
+      logger.info(`Akış türü [${next.title}]: ${type}`);
+      resource = createAudioResource(kaynak, { inputType: type });
+    }
     state.player.play(resource);
     sendPanel(state);
     otomatikOnYukle(state);
@@ -364,6 +402,7 @@ function createState(guild, voiceChannel, textChannel) {
     leaveTimer: null,
     queueBittiTimer: null,
     panelMessage: null,
+    onbellek: null,
     denenenBolgeler: [],
   };
 
@@ -445,6 +484,19 @@ async function seek(guildId, saniye) {
   if (!state?.current) return false;
 
   const hedef = state.current;
+
+  // Şarkı bellekte tutuluyorsa sarma, paket dizisinde konum değiştirmekten ibaret: ağ yok, ffmpeg yok, anında.
+  const onb = state.onbellek;
+  if (onb && !onb.temizlendi && !onb.eksik && onb.url === hedef.url) {
+    let index = Math.round((saniye * 1000) / paketOnbellegi.PAKET_MS);
+    // Şarkının sonunu aşan hedef son pakete çekilir (şarkı bitip sıradakine geçilir); inmemiş bölüme sarılırsa
+    // okuyucu paketler gelene kadar bekler.
+    if (onb.tamamlandi) index = Math.min(index, Math.max(0, onb.paketler.length - 1));
+    hedef.seekOffsetMs = index * paketOnbellegi.PAKET_MS;
+    state.player.play(createAudioResource(onb.okuyucu(index), { inputType: StreamType.Opus }));
+    refreshPanel(guildId);
+    return true;
+  }
 
   let akis;
   let girdi;
