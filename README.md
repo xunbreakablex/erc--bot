@@ -92,5 +92,6 @@ yeni bir yt-dlp sürümü çıkmış olabilir: `docker compose build && docker c
 
 - `.env` dosyasını asla commit'leme — zaten gitignore'da. Çerez dosyası (`secrets/`) da öyle.
 - `canvas` (`!caption`, `!capsle` tarafından kullanılıyor) için Alpine tabanlı Docker build'i VPS'inde yavaş çalışıyor ya da başarısız oluyorsa, Dockerfile'ın base image'ını `node:20-bookworm-slim` yap ve `apk add` satırını `apt-get install -y python3 make g++ libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev` ile değiştir.
+- Müzikte çalan şarkının Opus paketleri bellekte tutulur (varsayılan en fazla 20 MB; `.env`: `SARMA_ONBELLEK_MB`). İleri/geri sarma ve şarkı tekrarı YouTube'a yeni istek atmadan bu bellekten yapılır; sınırı aşan uzun içerikler (yaklaşık 17 dk üstü) eskisi gibi akıştan çalınır, sarma yt-dlp/ffmpeg ile yapılır. Diğer isteğe bağlı ayarlar `.env.example` içinde.
 - `!play` müzik komutu ses dönüştürme için `ffmpeg-static` paketinin indirdiği ffmpeg'i kullanır — ayrıca sistemde ffmpeg kurulu olmasına gerek yok.
 - Önekli komutlarda ephemeral (özel/gizli) yanıt diye bir şey yok — her yanıt normal, herkese görünen bir kanal mesajıdır.

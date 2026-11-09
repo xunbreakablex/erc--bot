@@ -33,6 +33,7 @@ function iscibaslat() {
   });
   const dustu = (hata) => {
     if (isci === w) isci = null; // bir sonraki aramada yeniden başlatılır
+    hata.iscideDustu = true; // ara() bu işaretle beklemedeki aramaları ana thread'de yeniden dener
     bekleyenleriReddet(hata);
   };
   w.on('error', (hata) => {
@@ -55,6 +56,16 @@ async function anaThreaddeAra(sorgu) {
 // Dönen sonuç yt-search'ünkine benzer: `videos[]` içinde videoId, url, title, seconds, duration.seconds,
 // author.name ve thumbnail alanları vardır.
 function ara(sorgu) {
+  return iscideAra(sorgu).catch((hata) => {
+    // İşçi yüklenemedi ya da arama sürerken düştü: kullanıcı hata görmesin, arama eskisi gibi ana thread'de yapılır.
+    // (Zaman aşımı ve YouTube'un kendi hataları yeniden denenmez.)
+    if (!hata?.iscideDustu) throw hata;
+    logger.warn(`Arama işçisi düştü, ana thread'de yeniden aranıyor: ${hata.message}`);
+    return anaThreaddeAra(sorgu);
+  });
+}
+
+function iscideAra(sorgu) {
   return new Promise((coz, reddet) => {
     let w;
     try {

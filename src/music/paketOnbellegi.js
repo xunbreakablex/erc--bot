@@ -50,6 +50,7 @@ class PaketOnbellegi extends EventEmitter {
     this.eksik = false; // akış tam bitmeden koptuysa ya da kesildiyse true: tekrar çalmada kullanılmaz
     this.temizlendi = false;
     this.kaynak = null;
+    this.sonOkuyucu = null;
     this.kill = () => {};
     this.setMaxListeners(20);
   }
@@ -84,6 +85,7 @@ class PaketOnbellegi extends EventEmitter {
     this.emit('degisim'); // bekleyen okuyucular bitişi görsün
     this.paketler = [];
     this.bayt = 0;
+    this.sonOkuyucu = null;
     this.removeAllListeners();
   }
 
@@ -92,8 +94,12 @@ class PaketOnbellegi extends EventEmitter {
   }
 
   // `index`'inci paketten başlayarak çalan bir akış verir (sarma = yeni okuyucu). Her okuyucu kendi konumunu tutar.
+  // Aynı anda tek okuyucu çalar: sarmada yenisi gelince eskisi kapatılır. Aksi halde inmemiş bölüme art arda
+  // sarılınca terk edilen okuyucular paket beklemeye devam edip dinleyici biriktirirdi.
   okuyucu(index = 0) {
-    return new PaketOkuyucu(this, Math.max(0, Math.floor(index)));
+    this.sonOkuyucu?.destroy();
+    this.sonOkuyucu = new PaketOkuyucu(this, Math.max(0, Math.floor(index)));
+    return this.sonOkuyucu;
   }
 }
 

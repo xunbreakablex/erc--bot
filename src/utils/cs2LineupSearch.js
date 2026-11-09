@@ -3,6 +3,7 @@ const { HARITALAR, TIPLER, KANALLAR, sorgular } = require('../content/cs2Lineups
 const logger = require('./logger');
 
 const ONBELLEK_TTL_MS = 6 * 60 * 60 * 1000;
+const ONBELLEK_SINIRI = 200;
 const EN_KISA_SN = 5;
 const EN_UZUN_SN = 90;
 const EN_FAZLA_SONUC = 20;
@@ -38,10 +39,12 @@ async function lineupAra(haritaKey, tipKey, filtre = null) {
   const harita = HARITALAR[haritaKey];
   const tip = TIPLER[tipKey];
   const bulunanlar = new Map();
+  let hataOldu = false;
 
   for (const sorgu of sorgular(haritaKey, tipKey, filtre)) {
     // Tek bir sorgu patlarsa diğerleri devam etsin.
     const sonuc = await ara(sorgu).catch((err) => {
+      hataOldu = true;
       logger.warn(`CS2 lineup araması başarısız: "${sorgu}" (${err?.message || err})`);
       return { videos: [] };
     });
@@ -68,7 +71,12 @@ async function lineupAra(haritaKey, tipKey, filtre = null) {
     )
     .slice(0, EN_FAZLA_SONUC);
 
-  onbellek.set(anahtar, { zaman: Date.now(), sonuc });
+  // Geçici bir arama hatası (zaman aşımı vb.) 6 saat boyunca "klip yok" cevabına dönüşmesin; ayrıca serbest metinli
+  // filtreler sonsuz anahtar üretebildiği için tablo sınırlı tutulur.
+  if (!hataOldu) {
+    if (onbellek.size >= ONBELLEK_SINIRI) onbellek.delete(onbellek.keys().next().value);
+    onbellek.set(anahtar, { zaman: Date.now(), sonuc });
+  }
   return sonuc;
 }
 
