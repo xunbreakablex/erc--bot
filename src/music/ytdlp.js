@@ -1,6 +1,8 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { PassThrough } = require('node:stream');
+const logger = require('../utils/logger');
 const { spawn, execFile } = require('child_process');
 
 // YouTube'dan akış çekmek için yt-dlp kullanıyoruz; ytdl-core YouTube değişikliklerine yetişemiyor.
@@ -225,14 +227,57 @@ const TAZE_URL_BEKLEME_MS = 2500;
 // Opus paket kopyalamada Cue aralığından (YouTube'da ~10 sn) büyük pay.
 const KOPYA_SEEK_PAYI_SN = 12;
 
-// Belirli bir saniyeden başlayan akış üretir; panelin "saniyeye git" özelliği bunu kullanıyor.
-// yt-dlp'nin stdout'una yazdığı akış üzerinde ffmpeg'in -ss ile arama yapması (input seeking, stdin
-// seekable olmadığı için) baştan itibaren decode edip atmak zorunda kalır; bunun yerine yt-dlp'den
-// doğrudan medya adresini alıp ffmpeg'e -i olarak veriyoruz, böylece HTTP byte-range ile hızlı seek olur.
-//
-// Kaynak Opus ise ffmpeg sadece paketleri kopyalayıp Ogg'a sarar (`opus: true` döner, çağıran tür
-// tespiti yapar): decode/encode yok, kalite kaybı yok. Değilse ham PCM (s16le) üretir.
-async function createSeekStream(url, saniye, onError) {
+// Akışın ilk verisini bekler. Veri tüketilmeden geri konur (unshift), sonradan okuyan etkilenmez. Veri gelmeden
+// akış kapanırsa ya da süre dolarsa hata fırlatır. Önceden başarısız olan bir ffmpeg boş bir akış döndürüyordu:
+// oynatıcı bunu "şarkı bitti" sanıp çalan şarkıyı atlatıyordu. Artık sarma, yeni akıştan veri gelmeden eski
+// akışın yerini almıyor.
+function ilkVeriyiBekle(stream, ms, ad) {
+  return new Promise((coz, reddet) => {
+    let zaman;
+    const temizle = () => {
+      clearTimeout(zaman);
+      stream.off('data', veriGeldi);
+      stream.off('end', bitti);
+      stream.off('close', bitti);
+      stream.off('error', hataVar);
+    };
+    // İlk parça yeni bir PassThrough'a yazılıp geri kalan akış ona bağlanıyor. Akışı duraklatıp parçayı geri koymak
+    // (unshift) çalışmıyor: duraklatılmış akışa sonradan 'data' dinleyicisi eklenince akış kendiliğinden başlamıyor
+    // (demuxProbe gibi dinleyiciler sonsuza kadar bekliyor).
+    const veriGeldi = (parca) => {
+      temizle();
+      const gecis = new PassThrough();
+      gecis.write(parca);
+      stream.pipe(gecis);
+      coz(gecis);
+    };
+    const bitti = () => {
+      temizle();
+      reddet(new Error(`${ad} veri vermeden kapandı`));
+    };
+    const hataVar = (err) => {
+      temizle();
+      reddet(err);
+    };
+    zaman = setTimeout(() => {
+      temizle();
+      reddet(new Error(`${ad} ${Math.round(ms / 1000)} sn içinde veri vermedi`));
+    }, ms);
+    stream.on('data', veriGeldi);
+    stream.once('end', bitti);
+    stream.once('close', bitti);
+    stream.once('error', hataVar);
+  });
+}
+
+const sonSatir = (metin) => String(metin).trim().split('\n').pop().trim();
+const ILK_VERI_BEKLEME_MS = 20_000;
+const YEDEK_ILK_VERI_BEKLEME_MS = 60_000;
+
+// Birinci yol: yt-dlp'den doğrudan medya adresi alınır, ffmpeg o adrese HTTP byte-range ile bağlanır (hızlı).
+// Kaynak Opus ise ffmpeg sadece paketleri kopyalayıp Ogg'a sarar (`opus: true` döner, çağıran tür tespiti
+// yapar): decode/encode yok, kalite kaybı yok. Değilse ham PCM (s16le) üretir.
+async function dogrudanSeekAkisi(url, saniye, onError) {
   const { url: dogrudanUrl, headers, opus, olusturuldu } = await getDirectStreamInfo(url);
 
   const bekleme = TAZE_URL_BEKLEME_MS - (Date.now() - olusturuldu);
@@ -270,19 +315,124 @@ async function createSeekStream(url, saniye, onError) {
 
   let stderr = '';
   proc.stderr.on('data', (chunk) => {
-    stderr += chunk;
+    stderr = (stderr + chunk).slice(-4000);
   });
-  proc.on('error', (err) => onError(err));
+  let basladi = false;
+  let calistirmaHatasi = null;
+  proc.on('error', (err) => {
+    calistirmaHatasi = err;
+    if (basladi) onError(err);
+  });
   proc.on('close', (code) => {
-    if (code && code !== 0 && !proc.killed) {
-      // Adres süresi dolmuş ya da reddedilmiş olabilir; bir sonraki seek yeni adres alsın.
+    // Akış başladıktan sonra kopma: çağıran haberdar edilir (başlangıç hataları aşağıda fırlatılır).
+    if (basladi && code && code !== 0 && !proc.killed) {
       dogrudanOnbellek.delete(url);
-      onError(new Error(stderr.trim().split('\n').pop() || `ffmpeg ${code} koduyla çıktı`));
+      onError(new Error(sonSatir(stderr) || `ffmpeg ${code} koduyla çıktı`));
     }
   });
   proc.stdout.on('error', () => {});
 
-  return { stream: proc.stdout, kill: () => proc.kill('SIGKILL'), opus };
+  const kill = () => proc.kill('SIGKILL');
+  let akis;
+  try {
+    akis = await ilkVeriyiBekle(proc.stdout, ILK_VERI_BEKLEME_MS, 'ffmpeg');
+  } catch (err) {
+    kill();
+    // Adres süresi dolmuş ya da reddedilmiş olabilir; bir sonraki seek yeni adres alsın.
+    dogrudanOnbellek.delete(url);
+    throw new Error(sonSatir(stderr) || calistirmaHatasi?.message || err.message);
+  }
+  basladi = true;
+  return { stream: akis, kill, opus };
+}
+
+// İkinci (yedek) yol: ffmpeg YouTube'a hiç bağlanmaz. yt-dlp akışı indirir (çerezi ve YouTube'un beklediği
+// kimliği kendisi halleder, normal çalma da bu yoldan gidiyor), ffmpeg standart girişten okuyup istenen
+// saniyeye kadar olan kısmı atar. Stdin aranamadığı için konuma kadar olan ses indirilip atılır (genelde birkaç
+// saniye), uzun videolarda yavaştır; bu yüzden yalnızca doğrudan yol başarısız olunca kullanılıyor. Çıktı ham PCM.
+async function ytdlpSeekAkisi(url, saniye, onError) {
+  const { args, temizle } = baseArgs();
+  const yt = spawn(YTDLP_PATH, [...args, '-f', SES_FORMATI, '-o', '-', url], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const ff = spawn(
+    FFMPEG_PATH,
+    ['-hide_banner', '-nostats', '-i', 'pipe:0', '-ss', String(Math.max(0, saniye)), '-vn', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
+    { stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+
+  yt.stdout.pipe(ff.stdin);
+  const sessiz = () => {};
+  yt.stdout.on('error', sessiz);
+  ff.stdin.on('error', sessiz); // ffmpeg erken kapanırsa EPIPE fırlamasın
+  ff.stdout.on('error', sessiz);
+
+  let ytStderr = '';
+  let ffStderr = '';
+  yt.stderr.on('data', (chunk) => {
+    ytStderr = (ytStderr + chunk).slice(-4000);
+  });
+  ff.stderr.on('data', (chunk) => {
+    ffStderr = (ffStderr + chunk).slice(-4000);
+  });
+
+  let basladi = false;
+  const kill = () => {
+    yt.kill('SIGKILL');
+    ff.kill('SIGKILL');
+  };
+  let ytCalistirmaHatasi = null;
+  yt.on('error', (err) => {
+    ytCalistirmaHatasi = err;
+    if (basladi) onError(err);
+  });
+  yt.on('close', (code) => {
+    temizle();
+    if (basladi && code && code !== 0 && !yt.killed) onError(new Error(sonSatir(ytStderr) || `yt-dlp ${code} koduyla çıktı`));
+  });
+  ff.on('close', (code) => {
+    yt.kill('SIGKILL'); // ffmpeg bittiyse yt-dlp'nin boşuna indirmesi sürmesin
+    if (basladi && code && code !== 0 && !ff.killed) onError(new Error(sonSatir(ffStderr) || `ffmpeg ${code} koduyla çıktı`));
+  });
+
+  let akis;
+  try {
+    akis = await ilkVeriyiBekle(ff.stdout, YEDEK_ILK_VERI_BEKLEME_MS, 'yt-dlp yedek yolu');
+  } catch (err) {
+    kill();
+    throw new Error(sonSatir(ytStderr) || ytCalistirmaHatasi?.message || sonSatir(ffStderr) || err.message);
+  }
+  basladi = true;
+  return { stream: akis, kill, opus: false };
+}
+
+// Belirli bir saniyeden başlayan akış üretir; panelin "saniyeye git" özelliği bunu kullanıyor. Döndürülen akıştan
+// veri geldiği doğrulanmıştır; başlatılamazsa hata fırlatır ve çağıran eski akışı çalmaya devam ettirir.
+// Önce hızlı doğrudan yol denenir (ffmpeg adrese kendisi bağlanır), olmazsa ffmpeg'in YouTube'a hiç bağlanmadığı
+// yt-dlp yoluna düşülür. Bu, veri merkezi IP'lerinde YouTube'un ffmpeg'in isteğini reddettiği durumlar içindir
+// (ffmpeg "Input/output error" ile düşüyor, yt-dlp ise çalışıyor).
+//
+// Doğrudan yol başarısız olup yedek yol çalışırsa, bir süre doğrudan yol denenmez: sunucuda hep reddediliyorsa
+// her sarmada önce onun düşmesi beklenmesin. Süre dolunca yeniden denenir.
+const DOGRUDAN_YOL_ARA_MS = 10 * 60_000;
+let dogrudanYolAtlanacakSon = 0;
+
+async function createSeekStream(url, saniye, onError) {
+  const dogrudanAtlandi = Date.now() < dogrudanYolAtlanacakSon;
+  const yollar = dogrudanAtlandi
+    ? [['yedek (yt-dlp)', ytdlpSeekAkisi], ['doğrudan adres', dogrudanSeekAkisi]]
+    : [['doğrudan adres', dogrudanSeekAkisi], ['yedek (yt-dlp)', ytdlpSeekAkisi]];
+
+  const hatalar = [];
+  for (const [ad, yol] of yollar) {
+    try {
+      const akis = await yol(url, saniye, onError);
+      if (hatalar.length > 0 && !dogrudanAtlandi) dogrudanYolAtlanacakSon = Date.now() + DOGRUDAN_YOL_ARA_MS;
+      return akis;
+    } catch (err) {
+      hatalar.push(`${ad}: ${err.message}`);
+      logger.warn(`Sarma: ${ad} yolu başarısız (${err.message})`);
+    }
+  }
+  throw new Error(hatalar.join('; '));
 }
 
 function createStream(url, onError) {

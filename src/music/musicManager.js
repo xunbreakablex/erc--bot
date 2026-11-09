@@ -449,8 +449,9 @@ async function seek(guildId, saniye) {
   let akis;
   let girdi;
   try {
+    // Geri çağrı yalnızca akış başladıktan SONRAKİ kopmalar içindir; başlatma hataları fırlatılıp aşağıda yakalanır.
     akis = await ytdlp.createSeekStream(hedef.url, saniye, (err) => {
-      logger.error('yt-dlp/ffmpeg seek hatası', err);
+      logger.error('yt-dlp/ffmpeg seek hatası (akış başladıktan sonra)', err);
       if (state.current === hedef) {
         state.textChannel.send(`⚠️ **${hedef.title}** için saniyeye gidilemedi: ${ytdlp.kisaHata(err)}.`).catch(() => {});
       }
@@ -458,8 +459,12 @@ async function seek(guildId, saniye) {
     // Opus paketleri kopyalandıysa (Ogg) türü tespit edilip olduğu gibi gönderilir; yoksa ham PCM'dir.
     girdi = akis.opus ? await akisiTani(akis.stream) : { stream: akis.stream, type: StreamType.Raw };
   } catch (err) {
+    // Yeni akış başlatılamadı: eski akışa dokunulmadı, çalan şarkı kesilmeden devam ediyor.
     akis?.kill();
-    logger.error('Seek akışı başlatılamadı', err);
+    logger.error('Seek akışı başlatılamadı (çalan şarkı devam ediyor)', err);
+    if (state.current === hedef) {
+      state.textChannel.send(`⚠️ **${hedef.title}** için saniyeye gidilemedi: ${ytdlp.kisaHata(err)}.`).catch(() => {});
+    }
     return false;
   }
 
